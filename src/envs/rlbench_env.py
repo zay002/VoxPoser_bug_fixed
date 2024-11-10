@@ -90,6 +90,83 @@ class VoxPoserRLBench():
         exposed_names = [names[0] for names in name_mapping]
         return exposed_names
 
+    def load_task_test(self, task):
+        """
+        Loads a new task into the environment and resets task-related variables.
+        Records the mask IDs of the robot, gripper, and objects in the scene.
+
+        Args:
+            task (str or rlbench.tasks.Task): Name of the task class or a task object.
+        """
+        self._reset_task_variables()
+
+        # 1. 加载任务
+        try:
+            if isinstance(task, str):
+                task = getattr(tasks, task)
+            self.task = self.rlbench_env.get_task(task)
+            print(f"Task '{self.task.get_name()}' loaded successfully.")
+        except Exception as e:
+            print(f"Error loading task: {e}")
+            return
+
+        # 2. 获取机器人、夹爪和场景对象的 Mask ID
+        try:
+            self.arm_mask_ids = [obj.get_handle() for obj in self.task._robot.arm.get_objects_in_tree(exclude_base=False, first_generation_only=True)]
+            self.gripper_mask_ids = [obj.get_handle() for obj in self.task._robot.gripper.get_objects_in_tree(exclude_base=False, first_generation_only=True)]
+            self.robot_mask_ids = self.arm_mask_ids + self.gripper_mask_ids
+            self.obj_mask_ids = [obj.get_handle() for obj in self.task._task.get_base().get_objects_in_tree(exclude_base=False, first_generation_only=True)]
+            print("Mask IDs collected successfully.")
+        except Exception as e:
+            print(f"Error collecting mask IDs: {e}")
+            return
+
+        # 3. 读取 task_object_names.json 文件
+        try:
+            with open("envs/task_object_names.json", "r") as file:
+                self.task_object_names = json.load(file)
+            name_mapping = self.task_object_names[self.task.get_name()]
+            exposed_names = [names[0] for names in name_mapping]
+            internal_names = [names[1] for names in name_mapping]
+            print("Object name mapping loaded successfully.")
+        except KeyError:
+            raise KeyError(f'Task {self.task.get_name()} not found in "envs/task_object_names.json".')
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON file: {e}")
+            return
+        except Exception as e:
+            print(f"Error loading object name mapping: {e}")
+            return
+
+        # 4. 遍历场景对象并建立映射
+        try:
+            max_objects = 1000  # 限制遍历的对象数量
+            scene_objs = self.task._task.get_base().get_objects_in_tree(object_type=ObjectType.SHAPE, exclude_base=False)
+
+            if len(scene_objs) > max_objects:
+                print(f"Warning: Too many objects ({len(scene_objs)}). Limiting to {max_objects} objects.")
+            
+            for i, scene_obj in enumerate(scene_objs[:max_objects]):
+                try:
+                    if scene_obj.get_name() in internal_names:
+                        exposed_name = exposed_names[internal_names.index(scene_obj.get_name())]
+                        self.name2ids[exposed_name] = [scene_obj.get_handle()]
+                        self.id2name[scene_obj.get_handle()] = exposed_name
+
+                        # 遍历子对象并添加映射
+                        for child in scene_obj.get_objects_in_tree(first_generation_only=True):
+                            self.name2ids[exposed_name].append(child.get_handle())
+                            self.id2name[child.get_handle()] = exposed_name
+
+                    if i % 100 == 0:
+                        print(f"Processed {i} objects.")
+                except Exception as e:
+                    print(f"Error processing object {scene_obj.get_name()}: {e}")
+
+            print("Object mapping completed successfully.")
+        except Exception as e:
+            print(f"Error during object mapping: {e}")
+
     def load_task(self, task):
         """
         Loads a new task into the environment and resets task-related variables.
@@ -179,6 +256,7 @@ class VoxPoserRLBench():
         Returns:
             tuple: A tuple containing scene points and colors.
         """
+        
         points, colors, masks = [], [], []
         for cam in self.camera_names:
             points.append(getattr(self.latest_obs, f"{cam}_point_cloud").reshape(-1, 3))
@@ -187,6 +265,8 @@ class VoxPoserRLBench():
         points = np.concatenate(points, axis=0)
         colors = np.concatenate(colors, axis=0)
         masks = np.concatenate(masks, axis=0)
+        
+       
 
         # only keep points within workspace
         chosen_idx_x = (points[:, 0] > self.workspace_bounds_min[0]) & (points[:, 0] < self.workspace_bounds_max[0])
@@ -195,6 +275,8 @@ class VoxPoserRLBench():
         points = points[(chosen_idx_x & chosen_idx_y & chosen_idx_z)]
         colors = colors[(chosen_idx_x & chosen_idx_y & chosen_idx_z)]
         masks = masks[(chosen_idx_x & chosen_idx_y & chosen_idx_z)]
+       
+
 
         if ignore_robot:
             robot_mask = np.isin(masks, self.robot_mask_ids)
@@ -206,18 +288,78 @@ class VoxPoserRLBench():
             points = points[~grasped_mask]
             colors = colors[~grasped_mask]
             masks = masks[~grasped_mask]
+        
+
+        
 
         # voxel downsample using o3d
         pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-        pcd.colors = o3d.utility.Vector3dVector(colors)
+        
+        #print(points)
+        points_float = points.astype(np.float64) 
+        pcd.points = o3d.utility.Vector3dVector(points_float)
+        #print(pcd.points)
+        #print(colors)
+        
+        colors_float = colors.astype(np.float64) / 255.0
+        #print(colors_float)
+        pcd.colors = o3d.utility.Vector3dVector(colors_float)
+        
+
         pcd_downsampled = pcd.voxel_down_sample(voxel_size=0.001)
+        
         points = np.asarray(pcd_downsampled.points)
-        colors = np.asarray(pcd_downsampled.colors).astype(np.uint8)
+        colors = np.asarray(pcd_downsampled.colors)
+        
 
         return points, colors
 
-    def reset(self):
+    def reset_test(self):
+        """
+        Resets the environment and the task. Also updates the visualizer.
+
+        Returns:
+            tuple: A tuple containing task descriptions and initial observations.
+        """
+        assert self.task is not None, "Please load a task first"
+
+        try:
+            print("Sampling task variation...")
+            self.task.sample_variation()
+            print("Task variation sampled successfully.")
+
+            # 打印当前任务变体编号
+            # print(f"Variation index: {self.task.get_variation_index()}")
+
+            print("Resetting task...")
+            descriptions, obs = self.task.reset()
+            print("Task reset completed.")
+
+            # 检查观察结果是否为空
+            if obs is None:
+                raise ValueError("Received None as observation. The task reset may have failed.")
+
+            print("Processing observations...")
+            obs = self._process_obs(obs)
+
+            # 更新初始观察和最新观察
+            self.init_obs = obs
+            self.latest_obs = obs
+
+            # 更新可视化器
+            print("Updating visualizer...")
+            self._update_visualizer()
+
+            print("Environment reset completed successfully.")
+            return descriptions, obs
+
+        except Exception as e:
+            print(f"Error during environment reset: {e}")
+            return None, None
+
+
+
+    def reset_original(self):
         """
         Resets the environment and the task. Also updates the visualizer.
 
@@ -364,7 +506,9 @@ class VoxPoserRLBench():
         """
         if self.visualizer is not None:
             points, colors = self.get_scene_3d_obs(ignore_robot=False, ignore_grasped_obj=False)
+            #nexi line executed with error
             self.visualizer.update_scene_points(points, colors)
+            
     
     def _process_obs(self, obs):
         """

@@ -73,8 +73,7 @@ class ValueMapVisualizer:
             raise ValueError(f'Unknown quality: {self.quality}; should be one of [low, medium, high]')
 
     def update_scene_points(self, points, colors=None):
-        points = points.astype(np.float16)
-        assert colors.dtype == np.uint8
+        
         self.scene_points = (points, colors)
 
     def visualize(self, info, show=False, save=True):
